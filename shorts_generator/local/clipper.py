@@ -7,7 +7,9 @@ Two stages per highlight:
      cascade — same approach as the original repo, no external models).
 """
 import os
+import shutil
 import subprocess
+import tempfile
 from typing import Dict, List, Optional, Tuple
 
 from ..config import LOCAL_OUTPUT_DIR
@@ -20,6 +22,26 @@ def _ratio(aspect_ratio: str) -> float:
         return float(w) / float(h)
     except (ValueError, ZeroDivisionError):
         return 9.0 / 16.0
+
+
+def _load_face_cascade():
+    """Load the bundled Haar face cascade.
+
+    On Windows OpenCV opens cascade XML through a narrow-char API, so a path
+    containing non-ASCII characters (e.g. a project under 下载资源文件/) fails
+    to load. Stage a copy under the ASCII-only temp dir when that happens.
+    """
+    import cv2  # type: ignore
+
+    src = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+    cascade = cv2.CascadeClassifier(src)
+    if not cascade.empty():
+        return cascade
+
+    staged = os.path.join(tempfile.gettempdir(), os.path.basename(src))
+    if not os.path.exists(staged):
+        shutil.copyfile(src, staged)
+    return cv2.CascadeClassifier(staged)
 
 
 def _cut_subclip(source_path: str, start: float, end: float, out_path: str) -> str:
@@ -66,7 +88,10 @@ def _reframe_vertical(in_path: str, out_path: str, aspect_ratio: str) -> str:
     crop_w = max(2, crop_w - (crop_w % 2))
     crop_h = max(2, crop_h - (crop_h % 2))
 
-    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    face_cascade = _load_face_cascade()
+    detect_faces = not face_cascade.empty()
+    if not detect_faces:
+        print("[clip/local] face detector unavailable — falling back to centre crop", flush=True)
 
     silent_path = out_path + ".silent.mp4"
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -80,7 +105,11 @@ def _reframe_vertical(in_path: str, out_path: str, aspect_ratio: str) -> str:
             break
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40))
+        faces = (
+            face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40))
+            if detect_faces
+            else []
+        )
         if len(faces) > 0:
             # Pick the largest face — usually the speaker.
             x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
